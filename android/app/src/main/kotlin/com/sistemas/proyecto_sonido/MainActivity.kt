@@ -18,12 +18,10 @@ import java.io.BufferedInputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 
 class MainActivity : FlutterActivity() {
@@ -50,12 +48,8 @@ class MainActivity : FlutterActivity() {
                     if (streamer == null) {
                         streamer = AudioStreamer(::sendStatus)
                     }
-                    try {
-                        streamer?.start(host, port)
-                        result.success(true)
-                    } catch (e: Exception) {
-                        result.error("START_FAILED", e.message, null)
-                    }
+                    streamer?.start(host, port)
+                    result.success(true)
                 }
                 "stop" -> {
                     streamer?.stop()
@@ -141,166 +135,167 @@ class MainActivity : FlutterActivity() {
 private class AudioStreamer(
     private val status: (String, String?) -> Unit,
 ) {
-    private val running = AtomicBoolean(false)
+    private val active = AtomicBoolean(false)
     @Volatile private var socket: Socket? = null
+    @Volatile private var worker: Thread? = null
 
     fun start(host: String, port: Int) {
-        if (!running.compareAndSet(false, true)) {
+        if (!active.compareAndSet(false, true)) {
             return
         }
 
-        val connectedLatch = CountDownLatch(1)
-        val startError = AtomicReference<Exception?>(null)
-        val startSignaled = AtomicBoolean(false)
-        fun signalStart(error: Exception?) {
-            if (startSignaled.compareAndSet(false, true)) {
-                if (error != null) {
-                    startError.set(error)
+        val thread = Thread {
+            while (active.get()) {
+                streamOnce(host, port)
+                if (active.get()) {
+                    status("reconnecting", null)
+                    try {
+                        Thread.sleep(1000)
+                    } catch (_: InterruptedException) {
+                    }
                 }
-                connectedLatch.countDown()
             }
         }
+        thread.isDaemon = true
+        worker = thread
+        thread.start()
+    }
 
-        val worker = Thread {
-            var localSocket: Socket? = null
-            var audioTrack: AudioTrack? = null
-            var connected = false
+    private fun streamOnce(host: String, port: Int) {
+        var localSocket: Socket? = null
+        var audioTrack: AudioTrack? = null
+        var connected = false
+        var stalled = false
 
-            try {
-                status("connecting", null)
-                localSocket = Socket()
-                localSocket.tcpNoDelay = true
-                localSocket.connect(InetSocketAddress(host, port), 5000)
-                socket = localSocket
+        try {
+            status("connecting", null)
+            localSocket = Socket()
+            localSocket.tcpNoDelay = true
+            localSocket.soTimeout = 4000
+            localSocket.connect(InetSocketAddress(host, port), 5000)
+            socket = localSocket
 
-                val input = BufferedInputStream(localSocket.getInputStream())
-                val header = ByteArray(16)
-                if (!readFully(input, header, 16)) {
-                    throw IllegalStateException("No se recibio encabezado")
+            val input = BufferedInputStream(localSocket.getInputStream())
+            val header = ByteArray(16)
+            if (!readFully(input, header, 16)) {
+                throw IllegalStateException("No se recibio encabezado")
+            }
+
+            val headerBuf = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+            val magicBytes = ByteArray(4)
+            headerBuf.get(magicBytes)
+            val magic = String(magicBytes, Charsets.US_ASCII)
+            if (magic != "PCM1") {
+                throw IllegalStateException("Encabezado invalido")
+            }
+
+            val sampleRate = headerBuf.int
+            val channels = headerBuf.short.toInt()
+            val bits = headerBuf.short.toInt()
+            val blockFrames = headerBuf.int
+            if (bits != 16) {
+                throw IllegalStateException("Solo PCM 16-bit es compatible")
+            }
+
+            val channelConfig = if (channels == 1) {
+                AudioFormat.CHANNEL_OUT_MONO
+            } else {
+                AudioFormat.CHANNEL_OUT_STEREO
+            }
+            val encoding = AudioFormat.ENCODING_PCM_16BIT
+            val frameSize = channels * (bits / 8)
+            val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding)
+            val desiredBuffer = max(minBuffer, blockFrames * frameSize * 4)
+
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(encoding)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(channelConfig)
+                        .build()
+                )
+                .setBufferSizeInBytes(desiredBuffer)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            audioTrack = track
+            track.play()
+
+            val buffer = ByteArray(max(blockFrames * frameSize, 4096))
+            var carrySize = 0
+            connected = true
+            status("connected", null)
+
+            while (active.get()) {
+                val read = try {
+                    input.read(buffer, carrySize, buffer.size - carrySize)
+                } catch (_: SocketTimeoutException) {
+                    if (!stalled) {
+                        status("stalled", "Sin audio")
+                        stalled = true
+                    }
+                    continue
                 }
-
-                val headerBuf = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
-                val magicBytes = ByteArray(4)
-                headerBuf.get(magicBytes)
-                val magic = String(magicBytes, Charsets.US_ASCII)
-                if (magic != "PCM1") {
-                    throw IllegalStateException("Encabezado invalido")
+                if (read <= 0) {
+                    break
                 }
-
-                val sampleRate = headerBuf.int
-                val channels = headerBuf.short.toInt()
-                val bits = headerBuf.short.toInt()
-                val blockFrames = headerBuf.int
-                if (bits != 16) {
-                    throw IllegalStateException("Solo PCM 16-bit es compatible")
+                if (stalled) {
+                    stalled = false
+                    status("connected", null)
                 }
-
-                val channelConfig = if (channels == 1) {
-                    AudioFormat.CHANNEL_OUT_MONO
-                } else {
-                    AudioFormat.CHANNEL_OUT_STEREO
-                }
-                val encoding = AudioFormat.ENCODING_PCM_16BIT
-                val frameSize = channels * (bits / 8)
-                val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding)
-                val desiredBuffer = max(minBuffer, blockFrames * frameSize * 4)
-
-                val track = AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(encoding)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(channelConfig)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(desiredBuffer)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-                audioTrack = track
-                track.play()
-
-                val buffer = ByteArray(max(blockFrames * frameSize, 4096))
-                var carrySize = 0
-                connected = true
-                status("connected", null)
-                signalStart(null)
-                while (running.get()) {
-                    val read = input.read(buffer, carrySize, buffer.size - carrySize)
-                    if (read <= 0) {
+                val total = carrySize + read
+                val aligned = total - (total % frameSize)
+                var offset = 0
+                while (offset < aligned) {
+                    val written = track.write(buffer, offset, aligned - offset)
+                    if (written <= 0) {
                         break
                     }
-                    val total = carrySize + read
-                    val aligned = total - (total % frameSize)
-                    var offset = 0
-                    while (offset < aligned) {
-                        val written = track.write(buffer, offset, aligned - offset)
-                        if (written <= 0) {
-                            break
-                        }
-                        offset += written
-                    }
-                    val leftover = total - aligned
-                    if (leftover > 0) {
-                        System.arraycopy(buffer, aligned, buffer, 0, leftover)
-                    }
-                    carrySize = leftover
+                    offset += written
                 }
-            } catch (e: Exception) {
-                status("error", e.message ?: "Fallo de conexion")
-                signalStart(e)
-            } finally {
-                if (!startSignaled.get()) {
-                    signalStart(IllegalStateException("Conexion interrumpida"))
+                val leftover = total - aligned
+                if (leftover > 0) {
+                    System.arraycopy(buffer, aligned, buffer, 0, leftover)
                 }
-                try {
-                    audioTrack?.stop()
-                } catch (_: Exception) {
-                }
-                try {
-                    audioTrack?.release()
-                } catch (_: Exception) {
-                }
-                try {
-                    localSocket?.close()
-                } catch (_: Exception) {
-                }
-                if (socket == localSocket) {
-                    socket = null
-                }
-                running.set(false)
-                if (connected) {
-                    status("disconnected", null)
-                }
+                carrySize = leftover
             }
-        }
-
-        worker.isDaemon = true
-        worker.start()
-
-        if (!connectedLatch.await(6, TimeUnit.SECONDS)) {
-            running.set(false)
+        } catch (e: Exception) {
+            status("error", e.message ?: "Fallo de conexion")
+        } finally {
             try {
-                socket?.close()
+                audioTrack?.stop()
             } catch (_: Exception) {
             }
-            throw IllegalStateException("Tiempo de espera al conectar")
+            try {
+                audioTrack?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                localSocket?.close()
+            } catch (_: Exception) {
+            }
+            if (socket == localSocket) {
+                socket = null
+            }
+            if (connected) {
+                status("disconnected", null)
+            }
         }
-
-        startError.get()?.let { throw it }
     }
 
     fun stop() {
-        running.set(false)
+        active.set(false)
         try {
             socket?.close()
         } catch (_: Exception) {
         }
+        worker?.interrupt()
     }
 
     private fun readFully(input: InputStream, buffer: ByteArray, length: Int): Boolean {

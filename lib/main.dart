@@ -157,6 +157,16 @@ class _SonarLinkPageState extends State<SonarLinkPage>
           _connecting = false;
           _status = 'Activo';
           break;
+        case 'stalled':
+          _running = true;
+          _connecting = false;
+          _status = 'Sin audio (esperando...)';
+          break;
+        case 'reconnecting':
+          _running = false;
+          _connecting = true;
+          _status = 'Reconectando...';
+          break;
         case 'disconnected':
           _running = false;
           _connecting = false;
@@ -263,11 +273,7 @@ class _SonarLinkPageState extends State<SonarLinkPage>
       if (!mounted) {
         return;
       }
-      setState(() {
-        _running = true;
-        _connecting = false;
-        _status = 'Activo';
-      });
+
     } on PlatformException catch (e) {
       setState(() {
         _running = false;
@@ -291,6 +297,9 @@ class _SonarLinkPageState extends State<SonarLinkPage>
   Color _statusColor() {
     if (_running) {
       return const Color(0xFF3AF2C8);
+    }
+    if (_status.startsWith('Sin audio')) {
+      return const Color(0xFFFFD166);
     }
     if (_connecting) {
       return const Color(0xFFFFD166);
