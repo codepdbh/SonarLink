@@ -1,0 +1,29 @@
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+    ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        '040904B0',
+        [StringStruct('CompanyName', 'Code PDBH, Ing Paulo Daniel Batuani Hurtado'),
+        StringStruct('FileDescription', 'SonarLink Audio Server GUI'),
+        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('InternalName', 'SonarLink-Server'),
+        StringStruct('LegalCopyright', 'Copyright (c) 2026'),
+        StringStruct('OriginalFilename', 'SonarLink-Server.exe'),
+        StringStruct('ProductName', 'SonarLink Server'),
+        StringStruct('ProductVersion', '1.0.0')])
+      ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

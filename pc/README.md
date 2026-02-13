@@ -1,60 +1,66 @@
-# Servidor de Audio (PC)
+# Servidor SonarLink (PC)
 
-Este servidor captura el audio del sistema en Windows (WASAPI loopback) y lo envía por TCP a la app Android.
+Este modulo permite transmitir el audio del PC a la app Android por Wi-Fi.
+
+## Modos disponibles
+- `server.py`: modo consola (CLI).
+- `server_gui.py`: interfaz grafica (iniciar, detener, logs, listar dispositivos).
 
 ## Requisitos
+- Windows 10/11
 - Python 3.10+
-- Windows
 
-## Instalación
+## Instalacion
 ```powershell
+cd pc
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Uso
-1. Opcional: listar dispositivos
+## Usar interfaz grafica
 ```powershell
-python server.py --list
+cd pc
+.\.venv\Scripts\activate
+python server_gui.py
 ```
 
-2. Ejecutar servidor
+O directo:
 ```powershell
-python server.py --host 0.0.0.0 --port 5000
+cd pc
+run_gui.bat
 ```
 
-3. En Android, ingresa la IP del PC y el puerto.
-
-Si el firewall de Windows pregunta, permite el acceso para redes privadas.
-
-## Problemas comunes
-- **Sin audio:** prueba otro backend de captura:
+## Usar modo consola
 ```powershell
-python server.py --backend soundcard
+cd pc
+.\.venv\Scripts\activate
+python server.py --backend soundcard --host 0.0.0.0 --port 5000
 ```
-Luego usa `--list` para elegir microfono loopback si es necesario:
+
+## Listar dispositivos
 ```powershell
 python server.py --backend soundcard --list
-python server.py --backend soundcard --device 0
+python server.py --backend sounddevice --list
 ```
 
-- **Error con numpy 2.x:** soundcard falla con numpy 2.x. Solucion:
+## Probar captura de audio (WAV)
+```powershell
+python server.py --backend soundcard --test-record 5 --outfile capture_test.wav
+```
+
+## Empaquetar en .exe
+```powershell
+cd pc
+build_exe.bat
+```
+
+Salida esperada:
+- `pc\dist\SonarLink-Server.exe`
+
+## Notas
+- Si aparece error con `numpy 2.x`, ejecutar:
 ```powershell
 pip install "numpy<2.0"
 ```
-
-- **Verificar captura:** graba 5 segundos a WAV y revisa si hay audio:
-```powershell
-python server.py --test-record 5 --outfile capture_test.wav
-```
-
-- **Error con loopback:** si ves un error de `WasapiSettings` o no hay audio, actualiza:
-```powershell
-pip install -U sounddevice
-```
-Si tu equipo no soporta loopback automático, habilita **Mezcla estéreo** en Windows y usa `--device <id>` (ver `--list`).
-
-## Parámetros útiles
-- `--device 3` para elegir dispositivo (sounddevice) o speaker (soundcard).
-- `--samplerate 48000` y `--channels 2` (por defecto).
+- Permite el servidor en firewall de Windows para redes privadas.

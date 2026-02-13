@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.sistemas.proyecto_sonido"
+    namespace = "com.codepdbh.sonarlink"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -21,7 +21,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.sistemas.proyecto_sonido"
+        applicationId = "com.codepdbh.sonarlink"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -42,3 +42,4 @@ android {
 flutter {
     source = "../.."
 }
+
