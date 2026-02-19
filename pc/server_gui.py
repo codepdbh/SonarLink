@@ -3,6 +3,9 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -25,6 +28,14 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     APP_DIR = getattr(sys, "_MEIPASS")
 ICON_PATH = os.path.join(APP_DIR, "assets", "server_icon.ico")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LOCAL_PROPERTIES_PATH = os.path.join(PROJECT_ROOT, "android", "local.properties")
+_ADB_EXECUTABLE: str | None = None
+if getattr(sys, "frozen", False):
+    RUNTIME_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    RUNTIME_DIR = os.path.dirname(os.path.abspath(__file__))
+BUNDLED_PLATFORM_TOOLS = os.path.join(APP_DIR, "assets", "platform-tools")
 
 
 class _QueueWriter:
@@ -92,6 +103,188 @@ def _run_list_worker(backend: str, log_queue: "mp.Queue[str]") -> None:
         sys.argv = old_argv
 
 
+def _detect_local_ips() -> list[str]:
+    ips: set[str] = set()
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+
+    # Fallback: detect outbound interface without sending real traffic.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            ip = probe.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+
+    def key(ip: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(part) for part in ip.split("."))
+        except ValueError:
+            return (999, 999, 999, 999)
+
+    return sorted(ips, key=key)
+
+
+def _read_android_sdk_from_local_properties() -> str | None:
+    if not os.path.exists(LOCAL_PROPERTIES_PATH):
+        return None
+
+    try:
+        with open(LOCAL_PROPERTIES_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                cleaned = line.strip()
+                if not cleaned.startswith("sdk.dir="):
+                    continue
+                raw = cleaned.split("=", 1)[1].strip()
+                raw = raw.replace("\\:", ":").replace("\\\\", "\\")
+                if raw:
+                    return raw
+    except OSError:
+        return None
+    return None
+
+
+def _candidate_adb_paths() -> list[str]:
+    candidates: list[str] = []
+
+    # Prefer bundled platform-tools first.
+    candidates.append(os.path.join(BUNDLED_PLATFORM_TOOLS, "adb.exe"))
+    candidates.append(os.path.join(BUNDLED_PLATFORM_TOOLS, "adb"))
+    candidates.append(os.path.join(RUNTIME_DIR, "assets", "platform-tools", "adb.exe"))
+    candidates.append(os.path.join(RUNTIME_DIR, "assets", "platform-tools", "adb"))
+    candidates.append(os.path.join(RUNTIME_DIR, "platform-tools", "adb.exe"))
+    candidates.append(os.path.join(RUNTIME_DIR, "platform-tools", "adb"))
+
+    for env_name in ("ADB_PATH", "SONARLINK_ADB"):
+        env_value = os.environ.get(env_name, "").strip().strip('"')
+        if env_value:
+            candidates.append(env_value)
+
+    from_path = shutil.which("adb")
+    if from_path:
+        candidates.append(from_path)
+
+    sdk_roots: list[str] = []
+    for env_name in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        value = os.environ.get(env_name, "").strip().strip('"')
+        if value:
+            sdk_roots.append(value)
+
+    local_sdk = _read_android_sdk_from_local_properties()
+    if local_sdk:
+        sdk_roots.append(local_sdk)
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip().strip('"')
+    if local_app_data:
+        sdk_roots.append(os.path.join(local_app_data, "Android", "Sdk"))
+
+    user_profile = os.environ.get("USERPROFILE", "").strip().strip('"')
+    if user_profile:
+        sdk_roots.append(os.path.join(user_profile, "AppData", "Local", "Android", "Sdk"))
+
+    for sdk_root in sdk_roots:
+        candidates.append(os.path.join(sdk_root, "platform-tools", "adb.exe"))
+        candidates.append(os.path.join(sdk_root, "platform-tools", "adb"))
+
+    # Preserve order, remove duplicates.
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = os.path.normpath(os.path.expandvars(os.path.expanduser(candidate)))
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(normalized)
+    return dedup
+
+
+def _resolve_adb_executable() -> str:
+    global _ADB_EXECUTABLE
+
+    if _ADB_EXECUTABLE:
+        if _ADB_EXECUTABLE.lower() == "adb":
+            return _ADB_EXECUTABLE
+        if os.path.exists(_ADB_EXECUTABLE):
+            return _ADB_EXECUTABLE
+
+    for candidate in _candidate_adb_paths():
+        if os.path.isfile(candidate):
+            _ADB_EXECUTABLE = candidate
+            return candidate
+
+    # Final PATH check.
+    if shutil.which("adb"):
+        _ADB_EXECUTABLE = "adb"
+        return "adb"
+
+    raise RuntimeError(
+        "No se encontro adb. Usa assets\\platform-tools\\adb.exe, instala Platform-Tools o define ADB_PATH."
+    )
+
+
+def _run_adb(args: list[str]) -> tuple[subprocess.CompletedProcess[str], str]:
+    adb_exe = _resolve_adb_executable()
+    try:
+        proc = subprocess.run(
+            [adb_exe, *args],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"No se pudo ejecutar adb ({adb_exe}): {exc}") from exc
+    return proc, adb_exe
+
+
+def _list_adb_devices() -> tuple[list[str], str, str]:
+    try:
+        proc, adb_exe = _run_adb(["devices"])
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    if proc.returncode != 0:
+        output = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(output or "adb devices fallo.")
+
+    serials: list[str] = []
+    lines = proc.stdout.splitlines()
+    for line in lines[1:]:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if cleaned.endswith("\tdevice"):
+            serials.append(cleaned.split("\t")[0])
+
+    return serials, proc.stdout.strip(), adb_exe
+
+
+def _adb_reverse(serial: str, port: int, remove: bool) -> None:
+    action = "--remove" if remove else ""
+    args = ["-s", serial, "reverse"]
+    if action:
+        args.append(action)
+    args.extend([f"tcp:{port}", f"tcp:{port}"])
+
+    try:
+        proc, _adb_exe = _run_adb(args)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Fallo ejecutando adb reverse en {serial}: {exc}") from exc
+
+    if proc.returncode != 0:
+        output = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(output or f"adb reverse fallo para {serial}.")
+
+
 class ServerGuiApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -114,9 +307,12 @@ class ServerGuiApp:
 
         self.server_process: mp.Process | None = None
         self.log_queue: "mp.Queue[str]" = mp.Queue()
+        self.local_ips_var = tk.StringVar(value="Detectando...")
+        self.usb_status_var = tk.StringVar(value="USB: inactivo")
 
         self._build_ui()
         self._load_config()
+        self._refresh_local_ips()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(120, self._poll_logs)
@@ -183,6 +379,52 @@ class ServerGuiApp:
             padx=(8, 0),
         )
 
+        net_frame = ttk.LabelFrame(top, text="Datos para el telefono", padding=10)
+        net_frame.grid(row=4, column=0, columnspan=6, sticky="ew", padx=6, pady=(12, 0))
+        net_frame.columnconfigure(0, weight=1)
+        net_frame.columnconfigure(1, weight=0)
+        net_frame.columnconfigure(2, weight=0)
+
+        ttk.Entry(
+            net_frame,
+            textvariable=self.local_ips_var,
+            state="readonly",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(net_frame, text="Actualizar IP", command=self._refresh_local_ips).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(0, 8),
+        )
+        ttk.Button(net_frame, text="Copiar IP", command=self._copy_primary_ip).grid(
+            row=0,
+            column=2,
+            sticky="ew",
+        )
+
+        usb_frame = ttk.LabelFrame(top, text="USB (sin red) - ADB reverse", padding=10)
+        usb_frame.grid(row=5, column=0, columnspan=6, sticky="ew", padx=6, pady=(10, 0))
+        usb_frame.columnconfigure(0, weight=1)
+        usb_frame.columnconfigure(1, weight=0)
+        usb_frame.columnconfigure(2, weight=0)
+
+        ttk.Label(usb_frame, textvariable=self.usb_status_var).grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Button(usb_frame, text="Activar USB", command=self._enable_usb_reverse).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(8, 8),
+        )
+        ttk.Button(usb_frame, text="Desactivar USB", command=self._disable_usb_reverse).grid(
+            row=0,
+            column=2,
+            sticky="ew",
+        )
+
         log_frame = ttk.LabelFrame(self.root, text="Logs", padding=10)
         log_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
         log_frame.columnconfigure(0, weight=1)
@@ -196,6 +438,8 @@ class ServerGuiApp:
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
         self._append_log("GUI lista. Configura parametros y pulsa 'Iniciar servidor'.")
+        self._append_log("Wi-Fi: usa una IP mostrada arriba y el puerto configurado.")
+        self._append_log("USB: activa 'ADB reverse' y en Android usa host 127.0.0.1.")
 
     def _add_field(self, parent: ttk.Frame, label: str, key: str, row: int, col: int) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=6)
@@ -272,6 +516,82 @@ class ServerGuiApp:
             _run_list_worker(backend, self.log_queue)
 
         threading.Thread(target=task, daemon=True).start()
+
+    def _refresh_local_ips(self) -> None:
+        ips = _detect_local_ips()
+        if ips:
+            self.local_ips_var.set(" | ".join(ips))
+            self._append_log(f"IPs detectadas: {', '.join(ips)}")
+        else:
+            self.local_ips_var.set("Sin IP LAN detectada")
+            self._append_log("No se detectaron IPs LAN. Puedes usar modo USB con ADB.")
+
+    def _copy_primary_ip(self) -> None:
+        ips = _detect_local_ips()
+        if not ips:
+            messagebox.showwarning("IP", "No hay IP de red local para copiar.")
+            return
+        ip = ips[0]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(ip)
+        self.root.update()
+        self._append_log(f"IP copiada: {ip}")
+
+    def _parse_port(self) -> int | None:
+        value = self.config_vars["port"].get().strip()
+        try:
+            port = int(value)
+        except ValueError:
+            return None
+        if port <= 0 or port > 65535:
+            return None
+        return port
+
+    def _enable_usb_reverse(self) -> None:
+        port = self._parse_port()
+        if port is None:
+            messagebox.showerror("USB", "Puerto invalido para ADB reverse.")
+            return
+        try:
+            serials, raw, adb_exe = _list_adb_devices()
+            if not serials:
+                self.usb_status_var.set("USB: sin dispositivos conectados")
+                self._append_log("ADB devices sin telefonos en estado 'device'.")
+                self._append_log(raw)
+                return
+            for serial in serials:
+                _adb_reverse(serial, port, remove=False)
+            self.usb_status_var.set(f"USB activo: 127.0.0.1:{port}")
+            self._append_log(f"ADB detectado: {adb_exe}")
+            self._append_log(
+                f"ADB reverse activo en {len(serials)} dispositivo(s). En Android usa 127.0.0.1:{port}."
+            )
+        except RuntimeError as exc:
+            self.usb_status_var.set("USB: error")
+            messagebox.showerror("USB", str(exc))
+            self._append_log(f"Error USB: {exc}")
+
+    def _disable_usb_reverse(self) -> None:
+        port = self._parse_port()
+        if port is None:
+            messagebox.showerror("USB", "Puerto invalido para ADB reverse.")
+            return
+        try:
+            serials, raw, adb_exe = _list_adb_devices()
+            if not serials:
+                self.usb_status_var.set("USB: sin dispositivos conectados")
+                self._append_log("ADB devices sin telefonos en estado 'device'.")
+                self._append_log(raw)
+                return
+            for serial in serials:
+                _adb_reverse(serial, port, remove=True)
+            self.usb_status_var.set("USB: inactivo")
+            self._append_log(f"ADB detectado: {adb_exe}")
+            self._append_log(f"ADB reverse removido en {len(serials)} dispositivo(s).")
+        except RuntimeError as exc:
+            self.usb_status_var.set("USB: error")
+            messagebox.showerror("USB", str(exc))
+            self._append_log(f"Error USB: {exc}")
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state="normal")

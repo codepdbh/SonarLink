@@ -31,6 +31,11 @@ cd pc
 run_gui.bat
 ```
 
+En la GUI ahora tienes:
+- IPs locales detectadas para copiar al telefono.
+- Modo USB (ADB reverse) para usar la app sin Wi-Fi.
+- Deteccion de `adb` priorizando `pc/assets/platform-tools/adb.exe`.
+
 ## Usar modo consola
 ```powershell
 cd pc
@@ -64,3 +69,14 @@ Salida esperada:
 pip install "numpy<2.0"
 ```
 - Permite el servidor en firewall de Windows para redes privadas.
+- Para USB:
+  - habilita depuracion USB en Android;
+  - conecta por cable;
+  - usa `Activar USB` en la GUI;
+  - en Android selecciona modo `USB`.
+  - deja `adb.exe`, `AdbWinApi.dll` y `AdbWinUsbApi.dll` en `pc/assets/platform-tools/`.
+  - necesitas `adb` (Platform-Tools). Si no esta en PATH, la GUI intenta detectar:
+    - `pc/assets/platform-tools/adb.exe` (prioridad);
+    - `ANDROID_SDK_ROOT` / `ANDROID_HOME`;
+    - `android/local.properties` (`sdk.dir`);
+    - `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`.

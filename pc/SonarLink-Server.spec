@@ -5,7 +5,7 @@ a = Analysis(
     ['server_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets\\server_icon.ico', 'assets')],
+    datas=[('assets\\server_icon.ico', 'assets'), ('assets\\platform-tools\\adb.exe', 'assets\\platform-tools'), ('assets\\platform-tools\\AdbWinApi.dll', 'assets\\platform-tools'), ('assets\\platform-tools\\AdbWinUsbApi.dll', 'assets\\platform-tools')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

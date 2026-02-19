@@ -37,11 +37,15 @@ class MainActivity : FlutterActivity() {
                 "start" -> {
                     val host = call.argument<String>("host")
                     val port = call.argument<Int>("port")
+                    val transport = call.argument<String>("transport") ?: "wifi"
                     if (host.isNullOrBlank() || port == null || port <= 0 || port > 65535) {
                         result.error("BAD_ARGS", "Host o puerto invalido", null)
                         return@setMethodCallHandler
                     }
-                    if (!isWifiConnected()) {
+                    val usbMode = transport.equals("usb", ignoreCase = true) ||
+                        host.equals("127.0.0.1") ||
+                        host.equals("localhost", ignoreCase = true)
+                    if (!usbMode && !isWifiConnected()) {
                         result.error("NO_WIFI", "Sin conexion Wi-Fi", null)
                         return@setMethodCallHandler
                     }

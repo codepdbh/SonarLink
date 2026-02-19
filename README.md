@@ -65,6 +65,16 @@ run_gui.bat
 3. Tap `Conectar`.
 4. If asked, disable battery optimization for SonarLink.
 
+### 3) Optional: USB mode (no Wi-Fi)
+
+1. Connect Android to PC via USB.
+2. Enable USB debugging on Android.
+3. In `SonarLink Server` GUI, click `Activar USB`.
+4. In Android app, select `USB` mode and connect.
+
+In USB mode, Android uses `127.0.0.1:<puerto>` through `adb reverse`.
+The PC GUI first looks for `pc/assets/platform-tools/adb.exe`.
+
 ## PC Server (CLI)
 
 List capture devices:
