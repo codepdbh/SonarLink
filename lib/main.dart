@@ -309,9 +309,15 @@ class _SonarLinkPageState extends State<SonarLinkPage>
     final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? {};
     final state = args['state'] as String? ?? '';
     final message = args['message'] as String?;
+    final wasRunning = _running;
+    final wasConnecting = _connecting;
+    var playConnectedTone = false;
     setState(() {
       switch (state) {
         case 'connected':
+          if (!wasRunning || wasConnecting) {
+            playConnectedTone = true;
+          }
           _running = true;
           _connecting = false;
           _status = 'Activo';
@@ -344,6 +350,17 @@ class _SonarLinkPageState extends State<SonarLinkPage>
           _status = message ?? _status;
       }
     });
+    if (playConnectedTone) {
+      _playConnectedTone();
+    }
+  }
+
+  Future<void> _playConnectedTone() async {
+    try {
+      await SystemSound.play(SystemSoundType.click);
+      await Future<void>.delayed(const Duration(milliseconds: 70));
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {}
   }
 
   Future<void> _rememberEndpoint(String host, int port) async {

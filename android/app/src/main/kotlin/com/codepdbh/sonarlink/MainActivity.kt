@@ -139,6 +139,13 @@ class MainActivity : FlutterActivity() {
 private class AudioStreamer(
     private val status: (String, String?) -> Unit,
 ) {
+    private class RecoverableStreamException(message: String) : RuntimeException(message)
+
+    companion object {
+        private const val SOCKET_READ_TIMEOUT_MS = 4000
+        private const val MAX_STALL_TIMEOUTS = 3
+    }
+
     private val active = AtomicBoolean(false)
     @Volatile private var socket: Socket? = null
     @Volatile private var worker: Thread? = null
@@ -175,7 +182,7 @@ private class AudioStreamer(
             status("connecting", null)
             localSocket = Socket()
             localSocket.tcpNoDelay = true
-            localSocket.soTimeout = 4000
+            localSocket.soTimeout = SOCKET_READ_TIMEOUT_MS
             localSocket.connect(InetSocketAddress(host, port), 5000)
             socket = localSocket
 
@@ -233,6 +240,7 @@ private class AudioStreamer(
 
             val buffer = ByteArray(max(blockFrames * frameSize, 4096))
             var carrySize = 0
+            var stallTimeoutCount = 0
             connected = true
             status("connected", null)
 
@@ -240,15 +248,22 @@ private class AudioStreamer(
                 val read = try {
                     input.read(buffer, carrySize, buffer.size - carrySize)
                 } catch (_: SocketTimeoutException) {
+                    stallTimeoutCount += 1
                     if (!stalled) {
                         status("stalled", "Sin audio")
                         stalled = true
                     }
+                    if (stallTimeoutCount >= MAX_STALL_TIMEOUTS) {
+                        throw RecoverableStreamException(
+                            "Sin audio por ${SOCKET_READ_TIMEOUT_MS * MAX_STALL_TIMEOUTS / 1000}s"
+                        )
+                    }
                     continue
                 }
                 if (read <= 0) {
-                    break
+                    throw RecoverableStreamException("Conexion cerrada")
                 }
+                stallTimeoutCount = 0
                 if (stalled) {
                     stalled = false
                     status("connected", null)
@@ -259,7 +274,7 @@ private class AudioStreamer(
                 while (offset < aligned) {
                     val written = track.write(buffer, offset, aligned - offset)
                     if (written <= 0) {
-                        break
+                        throw RecoverableStreamException("AudioTrack write=$written")
                     }
                     offset += written
                 }
@@ -269,8 +284,12 @@ private class AudioStreamer(
                 }
                 carrySize = leftover
             }
+        } catch (_: RecoverableStreamException) {
+            // Ruta esperada para reconexion automatica por timeout de silencio o error recuperable.
         } catch (e: Exception) {
-            status("error", e.message ?: "Fallo de conexion")
+            if (active.get()) {
+                status("error", e.message ?: "Fallo de conexion")
+            }
         } finally {
             try {
                 audioTrack?.stop()
