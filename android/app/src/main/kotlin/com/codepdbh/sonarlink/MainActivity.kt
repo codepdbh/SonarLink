@@ -142,29 +142,51 @@ private class AudioStreamer(
     private class RecoverableStreamException(message: String) : RuntimeException(message)
 
     companion object {
-        private const val SOCKET_READ_TIMEOUT_MS = 4000
-        private const val MAX_STALL_TIMEOUTS = 3
+        private const val SOCKET_READ_TIMEOUT_MS = 5000
+        private const val MAX_STALL_TIMEOUTS = 6
     }
 
     private val active = AtomicBoolean(false)
     @Volatile private var socket: Socket? = null
     @Volatile private var worker: Thread? = null
 
+    @Synchronized
     fun start(host: String, port: Int) {
+        val currentWorker = worker
+        if (active.get() && currentWorker != null && currentWorker.isAlive) {
+            return
+        }
+        if (active.get() && (currentWorker == null || !currentWorker.isAlive)) {
+            active.set(false)
+        }
         if (!active.compareAndSet(false, true)) {
             return
         }
 
         val thread = Thread {
-            while (active.get()) {
-                streamOnce(host, port)
-                if (active.get()) {
-                    status("reconnecting", null)
-                    try {
-                        Thread.sleep(1000)
-                    } catch (_: InterruptedException) {
+            try {
+                while (active.get()) {
+                    streamOnce(host, port)
+                    if (active.get()) {
+                        status("reconnecting", null)
+                        try {
+                            Thread.sleep(1000)
+                        } catch (_: InterruptedException) {
+                        }
                     }
                 }
+            } catch (t: Throwable) {
+                if (active.get()) {
+                    status("error", t.message ?: "Fallo interno")
+                }
+            } finally {
+                active.set(false)
+                worker = null
+                try {
+                    socket?.close()
+                } catch (_: Exception) {
+                }
+                socket = null
             }
         }
         thread.isDaemon = true
@@ -182,6 +204,7 @@ private class AudioStreamer(
             status("connecting", null)
             localSocket = Socket()
             localSocket.tcpNoDelay = true
+            localSocket.keepAlive = true
             localSocket.soTimeout = SOCKET_READ_TIMEOUT_MS
             localSocket.connect(InetSocketAddress(host, port), 5000)
             socket = localSocket
@@ -312,6 +335,7 @@ private class AudioStreamer(
         }
     }
 
+    @Synchronized
     fun stop() {
         active.set(false)
         try {
@@ -319,6 +343,7 @@ private class AudioStreamer(
         } catch (_: Exception) {
         }
         worker?.interrupt()
+        worker = null
     }
 
     private fun readFully(input: InputStream, buffer: ByteArray, length: Int): Boolean {

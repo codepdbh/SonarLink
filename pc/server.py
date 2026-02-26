@@ -1,8 +1,10 @@
 import argparse
+import contextlib
 import queue
 import socket
 import struct
 import sys
+import time
 import wave
 
 import sounddevice as sd
@@ -57,6 +59,15 @@ def clear_queue(q: "queue.Queue[bytes]") -> None:
             q.get_nowait()
     except queue.Empty:
         return
+
+
+def configure_tcp_keepalive(sock: socket.socket) -> None:
+    with contextlib.suppress(OSError):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Windows-specific keepalive tuning (on, idle_ms, interval_ms).
+    if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        with contextlib.suppress(OSError):
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 15000, 5000))
 
 
 def wasapi_loopback_supported() -> bool:
@@ -244,6 +255,7 @@ def stream_sounddevice(args, device: int, extra) -> None:
                 clear_queue(q)
                 try:
                     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    configure_tcp_keepalive(conn)
                     conn.sendall(header)
                     while True:
                         data = q.get()
@@ -281,15 +293,29 @@ def stream_soundcard(args, mic) -> None:
             print(f"Cliente conectado: {addr[0]}:{addr[1]}")
             try:
                 conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                configure_tcp_keepalive(conn)
                 conn.sendall(header)
+                silence_block = bytes(args.block_frames * args.channels * 2)
+                idle_sleep = max(args.block_frames / float(args.samplerate), 0.01)
                 with mic.recorder(
                     samplerate=args.samplerate,
                     channels=args.channels,
-                    blocksize=args.block_frames,
+                    blocksize=None,
                 ) as rec:
                     while True:
-                        data = rec.record(args.block_frames)
-                        if data is None:
+                        # `record(None)` returns currently available frames; when
+                        # idle it can be empty. Send silence to keep connection
+                        # active during playback pauses and avoid app timeouts.
+                        try:
+                            data = rec.record(None)
+                        except Exception as exc:
+                            print(f"Capture warning: {exc}", file=sys.stderr)
+                            conn.sendall(silence_block)
+                            time.sleep(idle_sleep)
+                            continue
+                        if data is None or len(data) == 0:
+                            conn.sendall(silence_block)
+                            time.sleep(idle_sleep)
                             continue
                         conn.sendall(float_to_pcm16(data))
             except (BrokenPipeError, ConnectionResetError, OSError):

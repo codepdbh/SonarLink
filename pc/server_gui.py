@@ -269,11 +269,13 @@ def _list_adb_devices() -> tuple[list[str], str, str]:
 
 
 def _adb_reverse(serial: str, port: int, remove: bool) -> None:
-    action = "--remove" if remove else ""
+    remote = f"tcp:{port}"
     args = ["-s", serial, "reverse"]
-    if action:
-        args.append(action)
-    args.extend([f"tcp:{port}", f"tcp:{port}"])
+    if remove:
+        # adb reverse --remove expects only one endpoint argument.
+        args.extend(["--remove", remote])
+    else:
+        args.extend([remote, remote])
 
     try:
         proc, _adb_exe = _run_adb(args)
@@ -282,6 +284,9 @@ def _adb_reverse(serial: str, port: int, remove: bool) -> None:
 
     if proc.returncode != 0:
         output = (proc.stderr or proc.stdout or "").strip()
+        if remove and "not found" in output.lower():
+            # Ya no habia regla activa para ese dispositivo; no es error real.
+            return
         raise RuntimeError(output or f"adb reverse fallo para {serial}.")
 
 
