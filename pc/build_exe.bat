@@ -28,6 +28,16 @@ if not exist "assets\platform-tools\AdbWinUsbApi.dll" (
   exit /b 1
 )
 
+if not exist "assets\driver" (
+  echo [ERROR] Falta carpeta assets\driver
+  exit /b 1
+)
+
+if not exist "assets\driver\VBCABLE_Setup_x64.exe" if not exist "assets\driver\VBCABLE_Setup.exe" (
+  echo [ERROR] Falta VBCABLE_Setup_x64.exe o VBCABLE_Setup.exe en assets\driver
+  exit /b 1
+)
+
 if not exist "version_info.txt" (
   echo [ERROR] Falta version_info.txt
   exit /b 1
@@ -48,6 +58,7 @@ pyinstaller ^
   --add-data "assets\platform-tools\adb.exe;assets\platform-tools" ^
   --add-data "assets\platform-tools\AdbWinApi.dll;assets\platform-tools" ^
   --add-data "assets\platform-tools\AdbWinUsbApi.dll;assets\platform-tools" ^
+  --add-data "assets\driver;assets\driver" ^
   --version-file "version_info.txt" ^
   server_gui.py
 

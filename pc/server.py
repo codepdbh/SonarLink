@@ -4,6 +4,7 @@ import queue
 import socket
 import struct
 import sys
+import threading
 import time
 import wave
 
@@ -15,15 +16,36 @@ except Exception:  # pragma: no cover - optional dependency
     sc = None
 
 MAGIC = b"PCM1"
+MIC_MAGIC = b"MIC1"
 DEFAULT_SAMPLE_RATE = 48000
 DEFAULT_CHANNELS = 2
 DEFAULT_BLOCK_FRAMES = 960  # 20 ms @ 48 kHz
+DEFAULT_MIC_PORT = 5001
 LOOPBACK_KEYWORDS = (
     "mezcla estereo",
     "stereo mix",
     "what u hear",
     "loopback",
 )
+VB_CABLE_HINTS = (
+    "cable input",
+    "vb-audio",
+    "virtual cable",
+)
+PREFERRED_MIC_OUTPUT_HINTS = (
+    "cable input",
+    "vb-audio virtual c",
+    "vb-audio virtual cable",
+)
+
+
+def _normalize_name(name: str) -> str:
+    return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in name).split())
+
+
+def _is_virtual_cable_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in VB_CABLE_HINTS)
 
 
 def list_sounddevice_devices() -> None:
@@ -53,6 +75,15 @@ def list_soundcard_devices() -> None:
         print(f"{idx}: {mic.name} ({tag})")
 
 
+def list_output_devices() -> None:
+    devices = sd.query_devices()
+    for idx, dev in enumerate(devices):
+        if dev["max_output_channels"] <= 0:
+            continue
+        hostapi = sd.query_hostapis(dev["hostapi"])["name"]
+        print(f"{idx}: {dev['name']} [{hostapi}] (out)")
+
+
 def clear_queue(q: "queue.Queue[bytes]") -> None:
     try:
         while True:
@@ -68,6 +99,18 @@ def configure_tcp_keepalive(sock: socket.socket) -> None:
     if hasattr(socket, "SIO_KEEPALIVE_VALS"):
         with contextlib.suppress(OSError):
             sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 15000, 5000))
+
+
+def read_exact(conn: socket.socket, size: int) -> bytes | None:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        data = conn.recv(remaining)
+        if not data:
+            return None
+        chunks.append(data)
+        remaining -= len(data)
+    return b"".join(chunks)
 
 
 def wasapi_loopback_supported() -> bool:
@@ -136,12 +179,110 @@ def resolve_soundcard_mic(device_arg: int | None):
         raise RuntimeError("No se encontraron microfonos con soundcard.")
     if device_arg is None:
         loopbacks = [m for m in microphones if getattr(m, "isloopback", False)]
-        mic = loopbacks[0] if loopbacks else microphones[0]
+        if not loopbacks:
+            mic = microphones[0]
+        else:
+            mic = None
+            # Prefer loopback that matches current Windows default output.
+            try:
+                default_output = sd.default.device[1]
+                if default_output is not None:
+                    default_name = _normalize_name(sd.query_devices(default_output)["name"])
+                    for candidate in loopbacks:
+                        candidate_name = _normalize_name(candidate.name)
+                        if default_name and (default_name in candidate_name or candidate_name in default_name):
+                            mic = candidate
+                            break
+            except Exception:
+                mic = None
+
+            # Avoid selecting virtual cable automatically for PC audio bridge.
+            if mic is None:
+                non_virtual = [m for m in loopbacks if not _is_virtual_cable_name(m.name)]
+                mic = non_virtual[0] if non_virtual else loopbacks[0]
     else:
         if device_arg < 0 or device_arg >= len(microphones):
             raise RuntimeError("Indice de microfono fuera de rango.")
         mic = microphones[device_arg]
     return mic
+
+
+def resolve_mic_output_device(device_arg: int | None) -> int:
+    devices = sd.query_devices()
+
+    if device_arg is not None:
+        dev = sd.query_devices(device_arg)
+        if dev["max_output_channels"] <= 0:
+            raise RuntimeError("El dispositivo de salida para microfono no tiene canales de salida.")
+        return device_arg
+
+    output_candidates = []
+    for dev in devices:
+        if dev["max_output_channels"] <= 0:
+            continue
+        hostapi_name = sd.query_hostapis(dev["hostapi"])["name"].lower()
+        name = dev["name"].lower()
+        score = 0
+
+        # Strong preference requested: "CABLE Input (VB-Audio Virtual C [MME] (out)".
+        if all(hint in name for hint in PREFERRED_MIC_OUTPUT_HINTS):
+            score += 250
+        if "cable input" in name:
+            score += 180
+        if "vb-audio" in name or "virtual cable" in name:
+            score += 100
+        if "mme" in hostapi_name:
+            score += 40
+
+        # Avoid picking the wrong endpoint when both CABLE Input/Output exist.
+        if "cable output" in name:
+            score -= 160
+        if "16ch" in name:
+            score -= 20
+
+        output_candidates.append((score, dev["index"]))
+
+    if output_candidates:
+        output_candidates.sort(reverse=True)
+        best_score, best_index = output_candidates[0]
+        if best_score > 0:
+            return best_index
+
+    default_out = sd.default.device[1]
+    if default_out is not None:
+        default_dev = sd.query_devices(default_out)
+        if default_dev["max_output_channels"] > 0:
+            return default_out
+
+    for dev in devices:
+        if dev["max_output_channels"] > 0:
+            return dev["index"]
+
+    raise RuntimeError("No se encontro dispositivo de salida para puente de microfono.")
+
+
+def describe_output_device(device: int, label: str) -> None:
+    dev = sd.query_devices(device)
+    hostapi = sd.query_hostapis(dev["hostapi"])["name"]
+    print(f"{label}: {device} - {dev['name']} [{hostapi}]")
+
+
+def mono16_to_stereo(data: bytes) -> bytes:
+    if not data:
+        return data
+    if len(data) % 2:
+        data = data[:-1]
+    out = bytearray(len(data) * 2)
+    j = 0
+    for i in range(0, len(data), 2):
+        lo = data[i]
+        hi = data[i + 1]
+        out[j] = lo
+        out[j + 1] = hi
+        out[j + 2] = lo
+        out[j + 3] = hi
+        j += 4
+    return bytes(out)
 
 
 def write_wav(path: str, samplerate: int, channels: int, data: bytes) -> None:
@@ -327,6 +468,94 @@ def stream_soundcard(args, mic) -> None:
                     pass
 
 
+def stream_mic_bridge(args, stop_event: threading.Event) -> None:
+    try:
+        output_device = resolve_mic_output_device(args.mic_output_device)
+    except RuntimeError as exc:
+        print(f"Mic bridge deshabilitado: {exc}", file=sys.stderr)
+        return
+
+    describe_output_device(output_device, "Mic bridge output")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((args.host, args.mic_port))
+        server.listen(1)
+        server.settimeout(1.0)
+        print(f"Mic bridge escuchando en {args.host}:{args.mic_port}")
+
+        while not stop_event.is_set():
+            try:
+                conn, addr = server.accept()
+            except TimeoutError:
+                continue
+            print(f"Mic cliente conectado: {addr[0]}:{addr[1]}")
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                configure_tcp_keepalive(conn)
+                conn.settimeout(1.0)
+
+                header = read_exact(conn, 16)
+                if header is None:
+                    raise RuntimeError("Mic bridge sin encabezado")
+                magic, samplerate, channels, bits, block_frames = struct.unpack("<4sIHHI", header)
+                if magic != MIC_MAGIC:
+                    raise RuntimeError("Mic bridge encabezado invalido")
+                if bits != 16:
+                    raise RuntimeError("Mic bridge solo soporta PCM 16-bit")
+                if channels <= 0:
+                    raise RuntimeError("Mic bridge canales invalidos")
+
+                input_channels = channels
+                frame_size = input_channels * (bits // 8)
+                stream_block = block_frames if block_frames > 0 else 0
+                output_channels = input_channels
+                out_dev = sd.query_devices(output_device)
+                max_out = int(out_dev["max_output_channels"])
+                if input_channels == 1 and max_out >= 2:
+                    # Some virtual devices are more stable with stereo frames.
+                    output_channels = 2
+                if output_channels > max_out:
+                    raise RuntimeError(
+                        f"Salida no soporta canales requeridos ({output_channels} > {max_out})"
+                    )
+
+                with sd.RawOutputStream(
+                    samplerate=samplerate,
+                    blocksize=stream_block,
+                    dtype="int16",
+                    channels=output_channels,
+                    device=output_device,
+                ) as out_stream:
+                    carry = b""
+                    while not stop_event.is_set():
+                        try:
+                            data = conn.recv(8192)
+                        except TimeoutError:
+                            continue
+                        if not data:
+                            break
+                        payload = carry + data
+                        aligned = len(payload) - (len(payload) % frame_size)
+                        if aligned > 0:
+                            chunk = payload[:aligned]
+                            if input_channels == 1 and output_channels == 2:
+                                chunk = mono16_to_stereo(chunk)
+                            out_stream.write(chunk)
+                        carry = payload[aligned:]
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                print(f"Mic cliente desconectado: {exc}")
+            except Exception as exc:
+                print(f"Mic bridge error: {exc}", file=sys.stderr)
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                print("Mic cliente cerrado")
+        print("Mic bridge detenido")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Streaming de audio PC -> Android por TCP.")
     parser.add_argument("--host", default="0.0.0.0", help="IP de escucha (default 0.0.0.0)")
@@ -334,10 +563,16 @@ def main() -> int:
     parser.add_argument("--samplerate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
     parser.add_argument("--block-frames", type=int, default=DEFAULT_BLOCK_FRAMES)
+    parser.add_argument("--mic-port", type=int, default=DEFAULT_MIC_PORT, help="Puerto TCP para mic bridge")
     parser.add_argument(
         "--device",
         type=int,
         help="Indice de dispositivo (sounddevice) o speaker (soundcard). Ver --list.",
+    )
+    parser.add_argument(
+        "--mic-output-device",
+        type=int,
+        help="Indice de salida para microfono remoto (ideal: CABLE Input).",
     )
     parser.add_argument(
         "--backend",
@@ -346,6 +581,19 @@ def main() -> int:
         help="Backend de captura (default: auto).",
     )
     parser.add_argument("--list", action="store_true", help="Lista dispositivos y sale")
+    parser.add_argument("--list-outputs", action="store_true", help="Lista dispositivos de salida y sale")
+    parser.add_argument(
+        "--audio-bridge",
+        choices=["on", "off"],
+        default="on",
+        help="Habilita servidor de audio PC->Android (default: on).",
+    )
+    parser.add_argument(
+        "--mic-bridge",
+        choices=["on", "off"],
+        default="on",
+        help="Habilita puente de microfono del celular al PC (default: on).",
+    )
     parser.add_argument(
         "--test-record",
         type=int,
@@ -360,6 +608,8 @@ def main() -> int:
     args = parser.parse_args()
 
     backend = resolve_backend(args.backend)
+    audio_enabled = args.audio_bridge == "on"
+    mic_enabled = args.mic_bridge == "on"
 
     if args.list:
         if backend == "soundcard":
@@ -367,27 +617,89 @@ def main() -> int:
         else:
             list_sounddevice_devices()
         return 0
+    if args.list_outputs:
+        list_output_devices()
+        return 0
+    if not audio_enabled and not mic_enabled:
+        print("Nada que iniciar: audio_bridge=off y mic_bridge=off", file=sys.stderr)
+        return 1
 
-    if backend == "soundcard":
-        mic = resolve_soundcard_mic(args.device)
-        loopback = getattr(mic, "isloopback", False)
-        label = "loopback" if loopback else "mic"
-        print(f"Backend: soundcard | Mic: {mic.name} ({label})")
+    mic_thread: threading.Thread | None = None
+    mic_stop_event = threading.Event()
+
+    def ensure_mic_bridge_started() -> None:
+        nonlocal mic_thread
+        if args.mic_bridge != "on":
+            return
+        if mic_thread is None or not mic_thread.is_alive():
+            mic_thread = threading.Thread(
+                target=stream_mic_bridge,
+                args=(args, mic_stop_event),
+                daemon=False,
+            )
+            mic_thread.start()
+
+    def hold_until_mic_stops() -> int:
+        print("Audio deshabilitado. Mic bridge activo.")
+        try:
+            while True:
+                if mic_thread is not None and not mic_thread.is_alive():
+                    print("Mic bridge finalizado")
+                    return 0
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print("Detenido por usuario")
+            return 0
+
+    if mic_enabled:
+        ensure_mic_bridge_started()
+
+    try:
+        if not audio_enabled:
+            return hold_until_mic_stops()
+
+        if backend == "soundcard":
+            try:
+                mic = resolve_soundcard_mic(args.device)
+            except RuntimeError as exc:
+                if mic_enabled:
+                    print(f"Audio bridge error: {exc}", file=sys.stderr)
+                    return hold_until_mic_stops()
+                raise
+            loopback = getattr(mic, "isloopback", False)
+            label = "loopback" if loopback else "mic"
+            print(f"Backend: soundcard | Mic: {mic.name} ({label})")
+            if args.test_record > 0:
+                record_test_soundcard(args, mic, args.outfile)
+                print(f"Archivo creado: {args.outfile}")
+                return 0
+            stream_soundcard(args, mic)
+            return 0
+
+        try:
+            device, extra = resolve_sounddevice_device(args.device)
+        except RuntimeError as exc:
+            if mic_enabled:
+                print(f"Audio bridge error: {exc}", file=sys.stderr)
+                return hold_until_mic_stops()
+            raise
+        describe_sounddevice(device)
         if args.test_record > 0:
-            record_test_soundcard(args, mic, args.outfile)
+            record_test_sounddevice(args, device, extra, args.outfile)
             print(f"Archivo creado: {args.outfile}")
             return 0
-        stream_soundcard(args, mic)
+        stream_sounddevice(args, device, extra)
         return 0
-
-    device, extra = resolve_sounddevice_device(args.device)
-    describe_sounddevice(device)
-    if args.test_record > 0:
-        record_test_sounddevice(args, device, extra, args.outfile)
-        print(f"Archivo creado: {args.outfile}")
+    except KeyboardInterrupt:
+        print("Detenido por usuario")
         return 0
-    stream_sounddevice(args, device, extra)
-    return 0
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if mic_thread is not None:
+            mic_stop_event.set()
+            mic_thread.join(timeout=2.5)
 
 
 if __name__ == "__main__":

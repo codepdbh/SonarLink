@@ -9,6 +9,7 @@ const String _lastHostKey = 'last_host';
 const String _lastPortKey = 'last_port';
 const String _lastModeKey = 'last_mode';
 const int _maxHistory = 8;
+const int _defaultMicPort = 5001;
 const String _officialServerReleaseUrl =
     'https://github.com/codepdbh/SonarLink/releases/';
 
@@ -53,16 +54,22 @@ class _SonarLinkPageState extends State<SonarLinkPage>
   final TextEditingController _portController = TextEditingController(
     text: '5000',
   );
+  final TextEditingController _micPortController = TextEditingController(
+    text: _defaultMicPort.toString(),
+  );
 
   SharedPreferences? _prefs;
   List<String> _savedHosts = <String>[];
   ConnectionMode _mode = ConnectionMode.wifi;
   bool _running = false;
   bool _connecting = false;
+  bool _micRunning = false;
+  bool _micConnecting = false;
   bool _batteryOptimizationIgnored = true;
   bool _batteryCheckLoading = true;
   bool _startupDialogShown = false;
   String _status = 'Detenido';
+  String _micStatus = 'Microfono apagado';
 
   @override
   void initState() {
@@ -303,9 +310,19 @@ class _SonarLinkPageState extends State<SonarLinkPage>
   }
 
   Future<void> _handleNativeCall(MethodCall call) async {
-    if (!mounted || call.method != 'status') {
+    if (!mounted) {
       return;
     }
+    if (call.method == 'status') {
+      await _handlePlaybackStatus(call);
+      return;
+    }
+    if (call.method == 'micStatus') {
+      await _handleMicStatus(call);
+    }
+  }
+
+  Future<void> _handlePlaybackStatus(MethodCall call) async {
     final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? {};
     final state = args['state'] as String? ?? '';
     final message = args['message'] as String?;
@@ -353,6 +370,46 @@ class _SonarLinkPageState extends State<SonarLinkPage>
     if (playConnectedTone) {
       _playConnectedTone();
     }
+  }
+
+  Future<void> _handleMicStatus(MethodCall call) async {
+    final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? {};
+    final state = args['state'] as String? ?? '';
+    final message = args['message'] as String?;
+    setState(() {
+      switch (state) {
+        case 'connected':
+          _micRunning = true;
+          _micConnecting = false;
+          _micStatus = 'Mic activo';
+          break;
+        case 'reconnecting':
+          _micRunning = false;
+          _micConnecting = true;
+          final detail = (message ?? '').trim();
+          _micStatus = detail.isEmpty
+              ? 'Mic reconectando...'
+              : 'Mic reconectando... ($detail)';
+          break;
+        case 'disconnected':
+          _micRunning = false;
+          _micConnecting = false;
+          _micStatus = 'Mic desconectado';
+          break;
+        case 'error':
+          _micRunning = false;
+          _micConnecting = false;
+          _micStatus = 'Mic error: ${message ?? 'desconocido'}';
+          break;
+        case 'connecting':
+          _micRunning = false;
+          _micConnecting = true;
+          _micStatus = 'Mic conectando...';
+          break;
+        default:
+          _micStatus = message ?? _micStatus;
+      }
+    });
   }
 
   Future<void> _playConnectedTone() async {
@@ -494,6 +551,67 @@ class _SonarLinkPageState extends State<SonarLinkPage>
     });
   }
 
+  Future<void> _startMic() async {
+    final isUsb = _mode == ConnectionMode.usb;
+    final host = isUsb ? '127.0.0.1' : _ipController.text.trim();
+    final port = int.tryParse(_micPortController.text.trim()) ?? -1;
+
+    if ((!isUsb && !_isHostValid(host)) || port <= 0 || port > 65535) {
+      setState(() {
+        _micStatus = 'Mic: IP o puerto invalido';
+      });
+      return;
+    }
+
+    try {
+      var granted = await _channel.invokeMethod<bool>('hasMicPermission') ?? false;
+      if (!granted) {
+        granted = await _channel.invokeMethod<bool>('requestMicPermission') ?? false;
+      }
+      if (!granted) {
+        setState(() {
+          _micStatus = 'Mic: permiso denegado';
+        });
+        return;
+      }
+    } on PlatformException catch (e) {
+      setState(() {
+        _micStatus = 'Mic permiso error: ${e.message ?? e.code}';
+      });
+      return;
+    }
+
+    setState(() {
+      _micStatus = 'Mic conectando...';
+      _micConnecting = true;
+    });
+
+    try {
+      await _channel.invokeMethod('startMic', {
+        'host': host,
+        'port': port,
+        'transport': isUsb ? 'usb' : 'wifi',
+      });
+    } on PlatformException catch (e) {
+      setState(() {
+        _micRunning = false;
+        _micConnecting = false;
+        _micStatus = 'Mic error: ${e.message ?? e.code}';
+      });
+    }
+  }
+
+  Future<void> _stopMic() async {
+    try {
+      await _channel.invokeMethod('stopMic');
+    } catch (_) {}
+    setState(() {
+      _micRunning = false;
+      _micConnecting = false;
+      _micStatus = 'Microfono apagado';
+    });
+  }
+
   Color _statusColor() {
     if (_running) {
       return const Color(0xFF3AF2C8);
@@ -505,6 +623,19 @@ class _SonarLinkPageState extends State<SonarLinkPage>
       return const Color(0xFFFFD166);
     }
     if (_status.startsWith('Error')) {
+      return const Color(0xFFFF6B6B);
+    }
+    return Colors.white70;
+  }
+
+  Color _micStatusColor() {
+    if (_micRunning) {
+      return const Color(0xFF3AF2C8);
+    }
+    if (_micConnecting) {
+      return const Color(0xFFFFD166);
+    }
+    if (_micStatus.startsWith('Mic error') || _micStatus.startsWith('Mic permiso')) {
       return const Color(0xFFFF6B6B);
     }
     return Colors.white70;
@@ -604,6 +735,7 @@ class _SonarLinkPageState extends State<SonarLinkPage>
     WidgetsBinding.instance.removeObserver(this);
     _ipController.dispose();
     _portController.dispose();
+    _micPortController.dispose();
     super.dispose();
   }
 
@@ -611,6 +743,8 @@ class _SonarLinkPageState extends State<SonarLinkPage>
   Widget build(BuildContext context) {
     final canStart = !_running && !_connecting;
     final canStop = _running || _connecting;
+    final canStartMic = !_micRunning && !_micConnecting;
+    final canStopMic = _micRunning || _micConnecting;
 
     return Scaffold(
       extendBody: true,
@@ -877,6 +1011,23 @@ class _SonarLinkPageState extends State<SonarLinkPage>
                                     ),
                                   ),
                                 ),
+                                const SizedBox(height: 10),
+                                TextField(
+                                  controller: _micPortController,
+                                  keyboardType: TextInputType.number,
+                                  decoration: InputDecoration(
+                                    labelText: 'Puerto Mic del PC',
+                                    hintText: '5001',
+                                    prefixIcon: const Icon(Icons.mic_rounded),
+                                    filled: true,
+                                    fillColor: Colors.black.withValues(
+                                      alpha: 0.18,
+                                    ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -998,6 +1149,76 @@ class _SonarLinkPageState extends State<SonarLinkPage>
                               ),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 10),
+                        _glassCard(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Row(
+                                  children: <Widget>[
+                                    Container(
+                                      width: 12,
+                                      height: 12,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: _micStatusColor(),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        'Estado Mic: $_micStatus',
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                Row(
+                                  children: <Widget>[
+                                    Expanded(
+                                      child: FilledButton.icon(
+                                        onPressed: canStartMic ? _startMic : null,
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: const Color(0xFF49C7FF),
+                                          foregroundColor: const Color(0xFF05272C),
+                                          padding: const EdgeInsets.symmetric(vertical: 14),
+                                        ),
+                                        icon: const Icon(Icons.mic_rounded),
+                                        label: const Text(
+                                          'Activar Mic',
+                                          style: TextStyle(fontWeight: FontWeight.w700),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: OutlinedButton.icon(
+                                        onPressed: canStopMic ? _stopMic : null,
+                                        style: OutlinedButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(vertical: 14),
+                                          side: BorderSide(
+                                            color: Colors.white.withValues(alpha: 0.48),
+                                          ),
+                                        ),
+                                        icon: const Icon(Icons.mic_off_rounded),
+                                        label: const Text(
+                                          'Desactivar Mic',
+                                          style: TextStyle(fontWeight: FontWeight.w700),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                         const SizedBox(height: 10),
                         Text(

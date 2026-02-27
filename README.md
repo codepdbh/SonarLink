@@ -1,47 +1,50 @@
 # SonarLink
 
-Windows PC audio to Android over local network, then Android routes to Bluetooth headphones.
-
-PC (Windows) -> Wi-Fi -> Android -> Bluetooth
+PC (Windows) -> Android -> Bluetooth  
+Audio streaming bridge for computers without Bluetooth audio output.
 
 ## ES - Que es y para que sirve
 
-SonarLink nace para resolver un problema simple: escuchar audio de una PC sin Bluetooth usando el telefono Android como puente.
+SonarLink nace para resolver un problema practico: escuchar el audio de una PC sin Bluetooth usando un telefono Android como puente.
 
-Sirve para:
+Uso principal:
 - Musica, videos y audio del sistema de Windows.
-- Uso local en la misma red Wi-Fi.
-- Evitar hardware extra en escenarios basicos.
+- Modo Wi-Fi/LAN y modo USB (`adb reverse`).
+- Microfono del telefono hacia la PC (mic bridge) de forma opcional.
 
 ## EN - What it is and why it exists
 
-SonarLink solves a practical issue: listening to PC audio when the computer has no Bluetooth audio output. Android works as the bridge.
+SonarLink solves a practical issue: play PC audio on Bluetooth headphones when the computer has no Bluetooth audio output. Android acts as the bridge.
 
-Use cases:
+Main use:
 - Music, videos, and Windows system audio.
-- Local streaming inside the same Wi-Fi network.
-- Avoid extra hardware for a simple setup.
+- Wi-Fi/LAN mode and USB mode (`adb reverse`).
+- Optional phone microphone to PC (mic bridge).
 
-## Features
+## Current Features
 
-- Real-time PCM streaming over TCP (`pc/server.py` -> Android app).
-- IP history on Android for faster reconnect.
-- Connection status and start/stop controls.
-- Battery optimization warning to reduce background disconnects.
-- PC server in CLI and GUI modes.
-- Windows EXE build for the server.
+- Real-time PCM audio bridge from `pc/server.py` to Android.
+- Optional mic bridge (Android mic -> PC output device).
+- Separate toggles for `Audio bridge` and `Mic bridge`.
+- Auto-detected local IPs in server GUI.
+- USB helper using bundled `assets/platform-tools/adb.exe`.
+- Driver check on startup in server GUI (VB-CABLE prompt/install when bundled).
+- Android IP history and reconnect workflow.
+- CLI server and GUI server.
+- Windows EXE packaging.
 
 ## Requirements
 
-- Windows 10/11 (PC side).
-- Python 3.10+ (PC side).
-- Android device on the same local network.
-- Flutter SDK (for app build).
-- Optional: `adb` for APK install.
+- Windows 10/11.
+- Python 3.10+.
+- Android phone.
+- Same LAN/Wi-Fi for network mode.
+- USB cable + USB debugging for USB mode.
+- Flutter SDK only if you want to build the Android app.
 
-## Quick Start (recommended)
+## Quick Start
 
-### 1) Start PC server (GUI)
+### 1) Run server GUI
 
 ```powershell
 cd pc
@@ -51,33 +54,29 @@ pip install -r requirements.txt
 python server_gui.py
 ```
 
-Alternative shortcut:
+Alternative:
 
 ```powershell
 cd pc
 run_gui.bat
 ```
 
-### 2) Connect from Android app
+### 2) Connect Android app (Wi-Fi)
 
-1. Open SonarLink on Android.
-2. Enter PC local IP and port `5000`.
-3. Tap `Conectar`.
-4. If asked, disable battery optimization for SonarLink.
+1. Open SonarLink app.
+2. Use one IP shown in the server GUI.
+3. Use `5000` for audio and `5001` for mic bridge (optional).
+4. Tap `Conectar`.
 
-### 3) Optional: USB mode (no Wi-Fi)
+### 3) Optional USB mode
 
-1. Connect Android to PC via USB.
-2. Enable USB debugging on Android.
-3. In `SonarLink Server` GUI, click `Activar USB`.
-4. In Android app, select `USB` mode and connect.
+1. Connect phone by USB and enable USB debugging.
+2. In server GUI, click `Activar USB`.
+3. In Android app, select USB mode (`host 127.0.0.1`).
 
-In USB mode, Android uses `127.0.0.1:<puerto>` through `adb reverse`.
-The PC GUI first looks for `pc/assets/platform-tools/adb.exe`.
+## CLI Usage
 
-## PC Server (CLI)
-
-List capture devices:
+List input/loopback devices:
 
 ```powershell
 cd pc
@@ -86,49 +85,47 @@ python server.py --backend soundcard --list
 python server.py --backend sounddevice --list
 ```
 
-Run server (usually best on many Realtek setups):
+List output devices (useful for mic bridge output):
 
 ```powershell
-python server.py --backend soundcard --host 0.0.0.0 --port 5000
+python server.py --list-outputs
 ```
 
-Alternative backend:
+Run with both bridges enabled:
 
 ```powershell
-python server.py --backend sounddevice --host 0.0.0.0 --port 5000
+python server.py --backend soundcard --host 0.0.0.0 --port 5000 --mic-port 5001 --audio-bridge on --mic-bridge on
 ```
 
-Capture test to WAV (verify loopback before using phone):
+Run only audio:
 
 ```powershell
-python server.py --backend soundcard --test-record 5 --outfile capture_test.wav
+python server.py --backend soundcard --host 0.0.0.0 --port 5000 --audio-bridge on --mic-bridge off
 ```
 
-## Build Android APK
+Run only microphone:
 
-From project root:
+```powershell
+python server.py --backend soundcard --host 0.0.0.0 --port 5000 --mic-port 5001 --audio-bridge off --mic-bridge on
+```
+
+## Build Android APK / AAB
 
 ```powershell
 flutter clean
 flutter pub get
 flutter build apk --release
+flutter build appbundle --release
 ```
 
-Output:
+Outputs:
+- `build/app/outputs/flutter-apk/app-release.apk`
+- `build/app/outputs/bundle/release/app-release.aab`
 
-`build/app/outputs/flutter-apk/app-release.apk`
+Package id:
+- `com.codepdbh.sonarlink`
 
-Debug APK:
-
-```powershell
-flutter build apk --debug
-```
-
-Current Android package id:
-
-`com.codepdbh.sonarlink`
-
-## Build PC Server as EXE
+## Build Windows EXE (Server GUI)
 
 ```powershell
 cd pc
@@ -136,33 +133,42 @@ build_exe.bat
 ```
 
 Output:
+- `pc/dist/SonarLink-Server.exe`
 
-`pc/dist/SonarLink-Server.exe`
+`build_exe.bat` includes:
+- `assets/platform-tools/*` for ADB.
+- `assets/driver/*` for VB-CABLE installer resources.
 
-## Google Play Resources
+## Privacy Policy
 
-- Privacy policy HTML: `docs/privacy-policy.html`
-- Suggested Pages URL:
-  `https://codepdbh.github.io/SonarLink/privacy-policy.html`
+- File: `docs/privacy-policy.html`
+- URL: `https://codepdbh.github.io/SonarLink/privacy-policy.html`
 
 ## Common Issues
 
-- No audio:
-  - Try `--backend soundcard`.
-  - Check if `capture_test.wav` has sound.
+- No PC audio: try backend `soundcard`.
+- No PC audio: verify capture with test WAV:
+
+```powershell
+python server.py --backend soundcard --test-record 5 --outfile capture_test.wav
+```
+
 - `numpy` 2.x error with `soundcard`:
-  - Run `pip install "numpy<2.0"`.
-- Android cannot connect:
-  - PC and phone must be on the same Wi-Fi/LAN.
-  - Allow Python/server in Windows Firewall (private network).
-- Works once then stops after idle:
-  - Keep app excluded from battery optimization.
+
+```powershell
+pip install "numpy<2.0"
+```
+
+- Android reconnect loops or random disconnects: exclude SonarLink from battery optimization.
+- Android reconnect loops or random disconnects: keep phone and PC on a stable local network.
+- Mic bridge output: by default it prefers `CABLE Input (VB-Audio Virtual C ... [MME])`.
+- Mic bridge output: override with `Mic out dev (opc.)` in GUI or `--mic-output-device <id>` in CLI.
 
 ## Project Structure
 
 - `lib/main.dart` - Flutter UI and connection flow.
-- `android/app/src/main/kotlin/com/codepdbh/sonarlink/MainActivity.kt` - native Android audio path.
-- `pc/server.py` - TCP audio capture/streaming server.
-- `pc/server_gui.py` - desktop GUI wrapper for server.
-- `pc/README.md` - focused guide for PC module.
-- `docs/privacy-policy.html` - bilingual privacy policy page.
+- `android/app/src/main/kotlin/com/codepdbh/sonarlink/MainActivity.kt` - Android audio/mic native bridge.
+- `pc/server.py` - audio + mic bridge server.
+- `pc/server_gui.py` - desktop GUI, USB helper, and startup checks.
+- `pc/README.md` - PC module quick guide.
+- `docs/privacy-policy.html` - privacy policy (ES/EN).

@@ -2,8 +2,12 @@
   "host": "0.0.0.0",
   "port": "5000",
   "backend": "soundcard",
-  "device": "",
+  "audio_bridge": "on",
+  "device": "2",
+  "mic_output_device": "6",
   "samplerate": "48000",
   "channels": "2",
-  "block_frames": "960"
+  "block_frames": "960",
+  "mic_port": "5001",
+  "mic_bridge": "on"
 }
